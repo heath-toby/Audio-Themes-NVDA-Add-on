@@ -10,7 +10,7 @@ import os
 import shutil
 import wx
 import gui
-from ..unspoken import UnspokenPlayer
+from ..audio_engine import SteamAudioPlayer
 from ..handler import AudioTheme, AudioThemesHandler, theme_roles, SUPPORTED_FILE_TYPES
 
 import addonHandler
@@ -20,9 +20,7 @@ addonHandler.initTranslation()
 
 def _show_audio_file_dialog(parent):
     # Translators: label for all supported file types found in an open dialog
-    wildcards = [_("All Supported Audio Formats") + "(*.wav, *.ogg)|*.wav;*.ogg"]
-    for ext, desc in SUPPORTED_FILE_TYPES.items():
-        wildcards.append(_(desc) + f" (*.{ext})|*.{ext}")
+    wildcards = [_("Wave Audio Files") + " (*.wav)|*.wav"]
     openFileDlg = wx.FileDialog(
         parent,
         # Translators: the title of a file dialog to browse to an audio file
@@ -107,9 +105,9 @@ class BaseDialog(wx.Dialog):
         if buttons is not None:
             line = wx.StaticLine(panel, -1, size=(20, -1), style=wx.LI_HORIZONTAL)
             sizer.Add(
-                line, 0, wx.GROW | wx.ALIGN_CENTER_VERTICAL | wx.RIGHT | wx.TOP, 10
+                line, 0, wx.EXPAND | wx.RIGHT | wx.TOP, 10
             )
-            sizer.Add(buttons, 0, wx.ALIGN_CENTER | wx.ALL, 10)
+            sizer.Add(buttons, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.ALL, 10)
 
         panel.SetSizer(sizer)
         panel.Layout()
@@ -157,7 +155,7 @@ class ThemeBlenderDialog(BaseDialog):
     def __init__(self, title, theme, editing=True):
         self.theme_state = ThemeState(theme)
         self.editing = editing
-        self.player = UnspokenPlayer()
+        self.player = SteamAudioPlayer()
         super().__init__(title)
 
     def addControls(self, sizer, parent):
@@ -238,20 +236,29 @@ class ThemeBlenderDialog(BaseDialog):
 
     def onSave(self, event):
         self.theme_state.apply_diff()
-        if not self.editing:
+        theme = self.theme_state.theme
+
+        # Check if theme already has a saved package path
+        if theme.package_path and os.path.dirname(theme.package_path):
+            # Auto-save to existing package location
+            self.save_theme_package(theme.package_path)
+        else:
+            # New theme - prompt for Save As
             saveFileDlg = wx.FileDialog(
                 self,
                 # Translators: title for a dialog to save an audio theme package
                 _("Save Audio Theme Package"),
                 # Translators: filetype description for audio theme packages
                 wildcard=_("Audio Theme Package (*.atp)|*.atp"),
-                defaultFile=f"{self.theme_state.theme.name}.atp",
+                defaultFile=f"{theme.name}.atp",
                 style=wx.FD_SAVE,
             )
             if saveFileDlg.ShowModal() == wx.ID_OK:
                 filename = saveFileDlg.GetPath().strip()
                 saveFileDlg.Destroy()
                 if filename:
+                    # Store the package path for future saves
+                    theme.package_path = filename
                     self.save_theme_package(filename)
         self.theme_state.state = self.theme_state.initial_state = ()
         self.Close()

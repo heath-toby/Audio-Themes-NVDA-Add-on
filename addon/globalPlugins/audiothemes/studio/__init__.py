@@ -104,7 +104,7 @@ class AudioThemesStudioStartupDialog(BaseDialog):
 
     def addControls(self, sizer, parent):
         # Translators: instruction message in the audio themes studio startup dialog
-        dialogMessage = wx.StaticText(self, -1, _(WELCOME_MSG))
+        dialogMessage = wx.StaticText(parent, -1, _(WELCOME_MSG))
         self.createNewThemeButton = CommandLinkButton(
             parent,
             -1,

@@ -18,7 +18,7 @@ import controlTypes
 import extensionPoints
 import globalVars
 from config import post_configSave, post_configReset, post_configProfileSwitch
-from .unspoken import UnspokenPlayer, libaudioverse, dll_hack
+from .audio_engine import SteamAudioPlayer
 
 import addonHandler
 
@@ -28,21 +28,25 @@ THEMES_HOME = os.path.join(globalVars.appArgs.configPath, "audio-themes")
 INFO_FILE_NAME = "info.json"
 SUPPORTED_FILE_TYPES = OrderedDict()
 # Translators: The file type to be shown in a dialog used to browse for audio files.
-SUPPORTED_FILE_TYPES["ogg"] = _("Ogg audio files")
-# Translators: The file type to be shown in a dialog used to browse for audio files.
 SUPPORTED_FILE_TYPES["wav"] = _("Wave audio files")
 # When the active audio theme is being changed
 audiotheme_changed = extensionPoints.Action()
 
 # Configuration spec
 audiothemes_config_defaults = {
-    "enable_audio_themes": "boolean(default=    True)",
+    "enable_audio_themes": "boolean(default=True)",
     "active_theme": 'string(default="Default")',
     "audio3d": "boolean(default=True)",
     "use_in_say_all": "boolean(default=True)",
     "speak_roles": "boolean(default=False)",
     "use_synth_volume": "boolean(default=True)",
     "volume": "integer(default=100)",
+    "use_reverb": "boolean(default=True)",
+    "RoomSize": "integer(default=10, min=0, max=100)",
+    "Damping": "integer(default=100, min=0, max=100)",
+    "WetLevel": "integer(default=9, min=0, max=100)",
+    "DryLevel": "integer(default=30, min=0, max=100)",
+    "Width": "integer(default=100, min=0, max=100)",
 }
 
 
@@ -81,6 +85,7 @@ class AudioTheme:
     summary: str
     is_active: bool = False
     sounds: dict = field(default_factory=dict)
+    package_path: str = ""  # Path to .atp file for auto-saving
 
     @property
     def info_file_path(self):
@@ -97,6 +102,9 @@ class AudioTheme:
         data = asdict(self)
         for unwanted_key in ("is_active", "directory", "sounds"):
             data.pop(unwanted_key)
+        # Only include package_path if it has a value
+        if not data.get("package_path"):
+            data.pop("package_path", None)
         return data
 
     def load(self, player):
@@ -138,7 +146,7 @@ class AudioThemesHandler:
     def __init__(self):
         config.conf.spec["audiothemes"] = audiothemes_config_defaults
         self.enabled = True
-        self.player = UnspokenPlayer()
+        self.player = SteamAudioPlayer()
         self.active_theme = None
         self.configure()
         for action in (
@@ -152,8 +160,9 @@ class AudioThemesHandler:
     def close(self):
         if self.active_theme is not None:
             self.active_theme.deactivate()
-        for _dll in dll_hack:
-            ctypes.windll.kernel32.FreeLibrary(_dll._handle)
+        if hasattr(self, 'player') and self.player is not None:
+            # Use close_and_cleanup_steam_audio to fully cleanup when plugin terminates
+            self.player.close_and_cleanup_steam_audio()
 
     def get_active_theme(self):
         if not config.conf["audiothemes"]["enable_audio_themes"]:
@@ -180,6 +189,7 @@ class AudioThemesHandler:
         self.player.speak_roles = user_config["speak_roles"]
         self.player.use_synth_volume = user_config["use_synth_volume"]
         self.player.volume = user_config["volume"]
+        self.player.use_reverb = user_config.get("use_reverb", True)
 
     def play(self, obj, sound):
         if not self.enabled or (self.active_theme is None):
@@ -187,7 +197,7 @@ class AudioThemesHandler:
         sound_obj = self.active_theme.sounds.get(sound)
         if sound_obj is None:
             return
-        self.player.play(obj, sound_obj)
+        self.player.play(obj, sound_obj, role=sound)
 
     @classmethod
     def get_theme_from_folder(cls, folderpath):

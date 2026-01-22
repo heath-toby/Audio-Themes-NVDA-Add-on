@@ -6,6 +6,8 @@
 import wx
 import config
 import gui
+from gui import guiHelper
+from gui.settingsDialogs import SettingsPanel
 from .handler import AudioThemesHandler, audiotheme_changed
 
 
@@ -14,95 +16,146 @@ import addonHandler
 addonHandler.initTranslation()
 
 
-class AudioThemesSettingsPanel(gui.SettingsPanel):
+class AudioThemesSettingsPanel(SettingsPanel):
     # Translators: Title for the settings panel in NVDA's multi-category settings
     title = _("Audio Themes")
 
     def makeSettings(self, settingsSizer):
+        sHelper = guiHelper.BoxSizerHelper(self, sizer=settingsSizer)
+
         # Translators: label for the checkbox to enable or disable audio themes
-        self.enableThemesCheckbox = wx.CheckBox(self, -1, _("Enable audio themes"))
-        self.innerPanel = innerPanel = wx.Panel(self)
+        self.enableThemesCheckbox = sHelper.addItem(
+            wx.CheckBox(self, label=_("Enable audio themes"))
+        )
+
         # Translators: label for a combobox containing a list of installed audio themes
-        installedThemesLabel = wx.StaticText(innerPanel, -1, _("Select theme:"))
-        self.installedThemesChoice = wx.Choice(innerPanel, -1)
+        self.installedThemesChoice = sHelper.addLabeledControl(
+            _("Select theme:"), wx.Choice, choices=[]
+        )
+
+        # Theme action buttons
+        bHelper = sHelper.addItem(guiHelper.ButtonHelper(wx.HORIZONTAL))
         # Translators: label for a button to show info about an audio theme
-        self.aboutThemeButton = wx.Button(innerPanel, -1, _("&About"))
+        self.aboutThemeButton = bHelper.addButton(self, label=_("&About"))
         # Translators: label for a button to remove an audio theme
-        self.removeThemeButton = wx.Button(innerPanel, -1, _("&Remove"))
+        self.removeThemeButton = bHelper.addButton(self, label=_("&Remove"))
         # Translators: label for a button to add a new audio theme
-        self.addThemeButton = wx.Button(innerPanel, -1, _("Add &New..."))
+        self.addThemeButton = bHelper.addButton(self, label=_("Add &New..."))
+
         # Translators: label for a checkbox to toggle the 3D mode
-        self.play3dCheckbox = wx.CheckBox(innerPanel, -1, _("Play sounds in 3D mode"))
+        self.play3dCheckbox = sHelper.addItem(
+            wx.CheckBox(self, label=_("Play sounds in 3D mode"))
+        )
+
         # Translators: label for a checkbox to toggle the speaking of object role
-        self.speakRoleCheckbox = wx.CheckBox(
-            innerPanel, -1, _("Speak roles such as button, edit box , link etc. ")
+        self.speakRoleCheckbox = sHelper.addItem(
+            wx.CheckBox(self, label=_("Speak roles such as button, edit box, link etc."))
         )
+
         # Translators: label for a checkbox to toggle the use of audio themes during say all
-        self.useInSayAllCheckbox = wx.CheckBox(
-            innerPanel, -1, _("Speak roles during say all")
+        self.useInSayAllCheckbox = sHelper.addItem(
+            wx.CheckBox(self, label=_("Speak roles during say all"))
         )
+
         # Translators: label for a checkbox to toggle whether the volume of this add-on should follow the synthesizer volume
-        self.useSynthVolumeCheckbox = wx.CheckBox(
-            innerPanel, -1, _("Use speech synthesizer volume")
+        self.useSynthVolumeCheckbox = sHelper.addItem(
+            wx.CheckBox(self, label=_("Use speech synthesizer volume"))
         )
+
         # Translators: label for a slider to set the volume of this add-on
-        volumeLabel = wx.StaticText(innerPanel, -1, _("Audio themes volume:"))
-        self.volumeSlider = wx.Slider(
-            innerPanel, -1, minValue=0, maxValue=100, name=_("Audio themes volume")
+        self.volumeSlider = sHelper.addLabeledControl(
+            _("Audio themes volume:"),
+            wx.Slider,
+            minValue=0,
+            maxValue=100
         )
-        innerSizer = wx.BoxSizer(wx.VERTICAL)
-        themesListSizer = wx.BoxSizer(wx.HORIZONTAL)
-        themesListSizer.AddMany(
-            [
-                (installedThemesLabel, 1, wx.LEFT | wx.TOP | wx.BOTTOM, 10),
-                (self.installedThemesChoice, 2, wx.EXPAND | wx.ALL, 10),
-            ]
+
+        # Translators: label for a checkbox to toggle reverb effect
+        self.useReverbCheckbox = sHelper.addItem(
+            wx.CheckBox(self, label=_("Use reverb effect"))
         )
-        actionSizer = wx.BoxSizer(wx.HORIZONTAL)
-        actionSizer.AddMany(
-            [
-                (self.aboutThemeButton, 1, wx.ALL, 5),
-                (self.removeThemeButton, 1, wx.ALL, 5),
-                (self.addThemeButton, 1, wx.ALL, 5),
-            ]
+
+        # Translators: label for room size slider
+        self.roomSizeSlider = sHelper.addLabeledControl(
+            _("Room size (0-100):"),
+            wx.Slider,
+            minValue=0,
+            maxValue=100
         )
-        innerSizer.Add(self.enableThemesCheckbox, 1, wx.ALL, 15)
-        innerSizer.AddMany(
-            [(themesListSizer, 1, wx.EXPAND, 10), (actionSizer, 1, wx.ALIGN_CENTER, 10)]
+
+        # Translators: label for damping slider
+        self.dampingSlider = sHelper.addLabeledControl(
+            _("Damping (0-100):"),
+            wx.Slider,
+            minValue=0,
+            maxValue=100
         )
-        innerSizer.AddSpacer(10)
-        innerSizer.AddMany(
-            [
-                (self.play3dCheckbox, 1, wx.ALL, 5),
-                (self.speakRoleCheckbox, 1, wx.ALL, 5),
-                (self.useInSayAllCheckbox, 1, wx.ALL, 5),
-                (self.useSynthVolumeCheckbox, 1, wx.ALL, 5),
-                (volumeLabel, 1, wx.TOP | wx.LEFT | wx.RIGHT, 10),
-                (self.volumeSlider, 1, wx.BOTTOM | wx.LEFT | wx.RIGHT, 5),
-            ]
+
+        # Translators: label for wet level slider
+        self.wetLevelSlider = sHelper.addLabeledControl(
+            _("Wet level (0-100):"),
+            wx.Slider,
+            minValue=0,
+            maxValue=100
         )
-        innerPanel.SetSizer(innerSizer)
-        innerSizer.Fit(innerPanel)
-        settingsSizer.Add(innerPanel, 1, wx.EXPAND)
+
+        # Translators: label for dry level slider
+        self.dryLevelSlider = sHelper.addLabeledControl(
+            _("Dry level (0-100):"),
+            wx.Slider,
+            minValue=0,
+            maxValue=100
+        )
+
+        # Translators: label for width slider
+        self.widthSlider = sHelper.addLabeledControl(
+            _("Width (0-100):"),
+            wx.Slider,
+            minValue=0,
+            maxValue=100
+        )
+
         # Bind events
-        self.Bind(wx.EVT_BUTTON, self.onAbout, self.aboutThemeButton)
-        self.Bind(wx.EVT_BUTTON, self.onRemove, self.removeThemeButton)
-        self.Bind(wx.EVT_BUTTON, self.onAdd, self.addThemeButton)
-        self.Bind(
-            wx.EVT_CHECKBOX,
-            lambda e: self.innerPanel.Enable(e.IsChecked()),
-            self.enableThemesCheckbox,
-        )
-        self.Bind(
-            wx.EVT_CHECKBOX,
-            lambda e: self.volumeSlider.Enable(not e.IsChecked()),
-            self.useSynthVolumeCheckbox,
-        )
-        self.Bind(
-            wx.EVT_CHOICE, self.onThemeSelectionChanged, self.installedThemesChoice
-        )
+        self.aboutThemeButton.Bind(wx.EVT_BUTTON, self.onAbout)
+        self.removeThemeButton.Bind(wx.EVT_BUTTON, self.onRemove)
+        self.addThemeButton.Bind(wx.EVT_BUTTON, self.onAdd)
+        self.enableThemesCheckbox.Bind(wx.EVT_CHECKBOX, self.onEnableChanged)
+        self.useSynthVolumeCheckbox.Bind(wx.EVT_CHECKBOX, self.onSynthVolumeChanged)
+        self.installedThemesChoice.Bind(wx.EVT_CHOICE, self.onThemeSelectionChanged)
+
         self._initialize_at_state()
         self._maintain_state()
+
+    def onEnableChanged(self, event):
+        enabled = self.enableThemesCheckbox.IsChecked()
+        self._updateControlsState(enabled)
+
+    def onSynthVolumeChanged(self, event):
+        self.volumeSlider.Enable(not self.useSynthVolumeCheckbox.IsChecked())
+
+    def _updateControlsState(self, enabled):
+        """Enable/disable controls based on whether audio themes are enabled."""
+        for ctrl in (
+            self.installedThemesChoice,
+            self.play3dCheckbox,
+            self.speakRoleCheckbox,
+            self.useInSayAllCheckbox,
+            self.useSynthVolumeCheckbox,
+            self.volumeSlider,
+            self.useReverbCheckbox,
+            self.roomSizeSlider,
+            self.dampingSlider,
+            self.wetLevelSlider,
+            self.dryLevelSlider,
+            self.widthSlider,
+            self.aboutThemeButton,
+            self.removeThemeButton,
+            self.addThemeButton,
+        ):
+            ctrl.Enable(enabled)
+        if enabled:
+            self.volumeSlider.Enable(not self.useSynthVolumeCheckbox.IsChecked())
+            self.onThemeSelectionChanged(None)
 
     @property
     def selected_theme(self):
@@ -118,33 +171,48 @@ class AudioThemesSettingsPanel(gui.SettingsPanel):
         self.useInSayAllCheckbox.SetValue(conf["use_in_say_all"])
         self.useSynthVolumeCheckbox.SetValue(conf["use_synth_volume"])
         self.volumeSlider.SetValue(conf["volume"])
+        self.useReverbCheckbox.SetValue(conf.get("use_reverb", True))
+        self.roomSizeSlider.SetValue(conf.get("RoomSize", 10))
+        self.dampingSlider.SetValue(conf.get("Damping", 100))
+        self.wetLevelSlider.SetValue(conf.get("WetLevel", 9))
+        self.dryLevelSlider.SetValue(conf.get("DryLevel", 30))
+        self.widthSlider.SetValue(conf.get("Width", 100))
 
     def _maintain_state(self):
         self.audio_themes = sorted(AudioThemesHandler.get_installed_themes())
         self.installedThemesChoice.Clear()
         for theme in self.audio_themes:
             self.installedThemesChoice.Append(theme.name, theme)
-        for theme in self.audio_themes:
+        # Select the active theme
+        for i, theme in enumerate(self.audio_themes):
             if theme.folder == config.conf["audiothemes"]["active_theme"]:
-                self.installedThemesChoice.SetStringSelection(theme.name)
-        self.innerPanel.Enable(self.enableThemesCheckbox.IsChecked())
-        self.volumeSlider.Enable(not self.useSynthVolumeCheckbox.IsChecked())
-        self.onThemeSelectionChanged(None)
+                self.installedThemesChoice.SetSelection(i)
+                break
+        self._updateControlsState(self.enableThemesCheckbox.IsChecked())
 
     def onSave(self):
         conf = config.conf["audiothemes"]
         conf["enable_audio_themes"] = self.enableThemesCheckbox.IsChecked()
-        conf["active_theme"] = self.selected_theme.folder
+        if self.selected_theme:
+            conf["active_theme"] = self.selected_theme.folder
         conf["audio3d"] = self.play3dCheckbox.IsChecked()
         conf["speak_roles"] = self.speakRoleCheckbox.IsChecked()
         conf["use_in_say_all"] = self.useInSayAllCheckbox.IsChecked()
         conf["use_synth_volume"] = self.useSynthVolumeCheckbox.IsChecked()
         conf["volume"] = self.volumeSlider.GetValue()
+        conf["use_reverb"] = self.useReverbCheckbox.IsChecked()
+        conf["RoomSize"] = self.roomSizeSlider.GetValue()
+        conf["Damping"] = self.dampingSlider.GetValue()
+        conf["WetLevel"] = self.wetLevelSlider.GetValue()
+        conf["DryLevel"] = self.dryLevelSlider.GetValue()
+        conf["Width"] = self.widthSlider.GetValue()
 
     def postSave(self):
         audiotheme_changed.notify()
 
     def onAbout(self, event):
+        if not self.selected_theme:
+            return
         wx.MessageBox(
             # Translators: content of a message box containing theme information
             _("Name: {name}\nAuthor: {author}\n\n{summary}").format(
@@ -157,10 +225,12 @@ class AudioThemesSettingsPanel(gui.SettingsPanel):
 
     def onRemove(self, event):
         theme = self.selected_theme
+        if not theme:
+            return
         confirm = wx.MessageBox(
             # Translators: message asking the user to confirm the removal of an audio theme
             _(
-                "This can not be undone.\nAre you sure you  want to remove audio theme {name}?"
+                "This can not be undone.\nAre you sure you want to remove audio theme {name}?"
             ).format(name=theme.name),
             # Translators: title of a message asking the user to confirm the removal of an audio theme
             _("Remove Audio Theme"),
@@ -188,5 +258,5 @@ class AudioThemesSettingsPanel(gui.SettingsPanel):
 
     def onThemeSelectionChanged(self, event):
         flag = self.selected_theme is not None
-        for btn in (self.aboutThemeButton, self.removeThemeButton):
-            btn.Enable(flag)
+        self.aboutThemeButton.Enable(flag)
+        self.removeThemeButton.Enable(flag)

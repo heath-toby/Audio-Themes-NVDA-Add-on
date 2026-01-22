@@ -1,14 +1,33 @@
-# IMPORTANT: Development Status
+# Audio Themes Add-on For NVDA (Modernized for NVDA 2025)
 
-I'll update this add-on as my time permits. If anyone wants to contribute fixes, they can send pull requests.
+## Important Disclaimer
 
-If anyone wants to financially sponsor the development of this add-on, they can contact me at ibnomer2011@hotmail.com
+This version of the Audio Themes add-on has been modernized for NVDA 2025 compatibility by Tobias using **Claude Code** (Anthropic's AI coding assistant).
 
-Best
+**I am not a professional programmer.** If you have programming expertise and notice issues or areas for improvement, please feel free to audit, edit, or contribute to this codebase. Pull requests and code reviews are very welcome.
 
-Musharraf
+## What's New in Version 8.0
 
+- **Replaced libaudioverse with SteamAudio**: The old audio engine (libaudioverse) was unmaintained and caused issues. Now uses Valve's SteamAudio for 3D audio positioning.
+- **Removed outdated Python libraries**: Removed vendored asyncio/concurrent.futures backports that are no longer needed in modern Python.
+- **WAV format only**: Audio files are now WAV format instead of OGG for better compatibility.
+- **Reverb controls**: Added configurable reverb settings (room size, damping, wet/dry levels, width).
+- **Improved theme editor**: Save function now always exports to .atp package for sharing.
+- **NVDA 2025 compatibility**: Updated for NVDA 2025.1 and later.
 
+### Known Limitations
+
+- On web pages, sounds may play twice due to how NVDA's browse mode cursor works. This is a tradeoff to enable browse mode sound support.
+
+---
+
+## Original Development Status
+
+Original add-on by Musharraf Omer. If anyone wants to contribute fixes, they can send pull requests.
+
+If anyone wants to financially sponsor the development of this add-on, they can contact Musharraf at ibnomer2011@hotmail.com
+
+---
 
 # Audio Themes Add-on For NVDA
 This add-on creates a virtual audio display that plays sounds when focusing or navigating objects (such as buttons, links etc...) the audio will be played in a location that corresponds to the object's location in the visual display. The add-on also enables you to activate, install, remove, edit, create, and distribute audio theme packages.

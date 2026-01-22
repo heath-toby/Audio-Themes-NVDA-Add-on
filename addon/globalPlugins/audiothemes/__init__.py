@@ -18,7 +18,6 @@
 """
 
 from contextlib import suppress
-import sys
 import os
 import wx
 import tones
@@ -29,22 +28,16 @@ import scriptHandler
 import NVDAObjects
 import gui
 import speech
+import speech.speech
 import controlTypes
 import globalCommands
 import browseMode
+import config
+from speech.sayAll import SayAllHandler
 
 from .handler import AudioThemesHandler, SpecialProps
 from .settings import AudioThemesSettingsPanel
 from .studio import AudioThemesStudioStartupDialog
-
-
-PLUGIN_DIRECTORY = os.path.abspath(os.path.dirname(__file__))
-LIB_DIRECTORY = os.path.join(PLUGIN_DIRECTORY, "lib")
-sys.path.insert(0, LIB_DIRECTORY)
-import unsync
-
-sys.path.remove(LIB_DIRECTORY)
-
 
 import addonHandler
 
@@ -57,9 +50,12 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Patched functions
+        # Patched functions for browse mode support
         self.original_speech_speakTextInfo = speech.speakTextInfo
         speech.speakTextInfo = self.audio_themes_speech_speakTextInfo
+        # Hook to keep NVDA from announcing roles (technique from unspoken-ng)
+        self._original_getPropertiesSpeech = speech.speech.getPropertiesSpeech
+        speech.speech.getPropertiesSpeech = self._hook_getPropertiesSpeech
         # Normal instantiate
         self.handler = AudioThemesHandler()
         gui.settingsDialogs.NVDASettingsDialog.categoryClasses.append(
@@ -83,7 +79,46 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 AudioThemesSettingsPanel
             )
             gui.mainFrame.sysTrayIcon.menu.RemoveItem(self.studioMenuItem)
+            speech.speakTextInfo = self.original_speech_speakTextInfo
+            speech.speech.getPropertiesSpeech = self._original_getPropertiesSpeech
             self.handler.close()
+
+    def _should_suppress_role(self):
+        """Check if role speech should be suppressed based on settings."""
+        try:
+            conf = config.conf["audiothemes"]
+            # Don't suppress if audio themes are disabled
+            if not conf["enable_audio_themes"]:
+                return False
+            # Don't suppress during say-all if use_in_say_all is enabled
+            if conf["use_in_say_all"] and SayAllHandler.isRunning():
+                return False
+            # Don't suppress if speak_roles is enabled
+            if conf["speak_roles"]:
+                return False
+            return True
+        except Exception:
+            return False
+
+    def _hook_getPropertiesSpeech(
+        self,
+        reason=controlTypes.OutputReason.QUERY,
+        *args,
+        **kwargs
+    ):
+        """Hook that suppresses role speech when speak_roles is disabled.
+
+        Technique from unspoken-ng: rename 'role' to '_role' which NVDA ignores.
+        """
+        role = kwargs.get("role", None)
+        if role is not None:
+            # Only suppress if the role has a sound in the active theme
+            if self.handler.active_theme and role in self.handler.active_theme.sounds:
+                if self._should_suppress_role():
+                    # NVDA will not announce roles if we rename it to _role
+                    kwargs["_role"] = kwargs["role"]
+                    del kwargs["role"]
+        return self._original_getPropertiesSpeech(reason, *args, **kwargs)
 
     def on_studio_item_clicked(self, event):
         # Translators: title for the audio themes studio dialog
@@ -106,10 +141,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         ):
             return self.original_speech_speakTextInfo(info, *args, **kwargs)
         obj = info.NVDAObjectAtStart
-        if obj.role is controlTypes.ROLE_TABLE:
+        if obj.role == controlTypes.Role.TABLE:
             tones.beep(100, 100)
         gui.cinfo = obj
-        if obj.role is controlTypes.ROLE_REDUNDANTOBJECT:
+        if obj.role == controlTypes.Role.REDUNDANTOBJECT:
             obj = obj.parent
         self.playObject(obj)
         return self.original_speech_speakTextInfo(info, *args, **kwargs)
@@ -129,7 +164,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         nextHandler()
 
     def event_show(self, obj, nextHandler):
-        if obj.role == controlTypes.ROLE_HELPBALLOON:
+        if obj.role == controlTypes.Role.HELPBALLOON:
             obj.snd = SpecialProps.notify
             self.playObject(obj)
         nextHandler()
@@ -139,13 +174,12 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             self.playObject(obj)
         nextHandler()
 
-    @unsync.unsync
     def playObject(self, obj):
         if obj is None:
             return
         order = self.getOrder(obj)
         if getattr(obj, "snd", None) is None:
-            if 16384 in obj.states:
+            if controlTypes.State.PROTECTED in obj.states:
                 obj.snd = SpecialProps.protected
             elif order:
                 obj.snd = order
