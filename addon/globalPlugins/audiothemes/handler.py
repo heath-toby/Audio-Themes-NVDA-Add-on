@@ -199,6 +199,15 @@ class AudioThemesHandler:
             return
         self.player.play(obj, sound_obj, role=sound)
 
+    def play_queued(self, obj, sound):
+        """Play a sound without interrupting current playback."""
+        if not self.enabled or (self.active_theme is None):
+            return
+        sound_obj = self.active_theme.sounds.get(sound)
+        if sound_obj is None:
+            return
+        self.player.play_queued(obj, sound_obj, role=sound)
+
     @classmethod
     def get_theme_from_folder(cls, folderpath):
         expected = os.path.join(THEMES_HOME, folderpath)

@@ -6,6 +6,17 @@ This version of the Audio Themes add-on has been modernized for NVDA 2025 compat
 
 **I am not a professional programmer.** If you have programming expertise and notice issues or areas for improvement, please feel free to audit, edit, or contribute to this codebase. Pull requests and code reviews are very welcome.
 
+## What's New in Version 8.1.0
+
+- **Browse mode support**: Sounds now work properly in browse mode (arrow key navigation on web pages and documents). Sounds play once per object, whether arrowing or tabbing.
+- **Improved audio queuing**: Sounds for container roles such as dialog, menu, list, and window are now more likely to play fully without being cut off. Note: They may still occasionally be missed depending on how quickly focus changes.
+- **Smart deduplication**: Sounds only play when navigating to a different object, preventing repeated sounds when scrolling within the same element.
+- **Note**: Sounds play when navigating directly to a control (arrows, Tab, quick navigation keys). Inline controls mentioned within a line of text do not trigger sounds.
+
+## What's New in Version 8.0.1
+
+- **Fixed duplicate sounds**: Sounds no longer play twice when focus and navigator events fire together.
+
 ## What's New in Version 8.0
 
 - **Replaced libaudioverse with SteamAudio**: The old audio engine (libaudioverse) was unmaintained and caused issues. Now uses Valve's SteamAudio for 3D audio positioning.
@@ -14,10 +25,6 @@ This version of the Audio Themes add-on has been modernized for NVDA 2025 compat
 - **Reverb controls**: Added configurable reverb settings (room size, damping, wet/dry levels, width).
 - **Improved theme editor**: Save function now always exports to .atp package for sharing.
 - **NVDA 2025 compatibility**: Updated for NVDA 2025.1 and later.
-
-### Known Limitations
-
-- On web pages, sounds may play twice due to how NVDA's browse mode cursor works. This is a tradeoff to enable browse mode sound support.
 
 ---
 

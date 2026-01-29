@@ -202,6 +202,33 @@ class SteamAudioPlayer:
 
         threading.Thread(target=play_async, daemon=True).start()
 
+    def play_queued(self, obj, sound, role=None):
+        """Play a sound without interrupting current playback.
+
+        Used for container sounds that should queue up before the main sound.
+
+        Args:
+            obj: NVDA object with location property
+            sound: Dict returned by make_sound_object()
+            role: The controlTypes role being played (optional)
+        """
+        if sound is None:
+            return
+
+        # Extract object properties on main thread (COM threading requirement)
+        params = self._extract_sound_params(obj, sound)
+        if params is None:
+            return
+
+        # Play in background thread (queued, doesn't interrupt)
+        def play_async():
+            try:
+                self._play_sound_queued(params)
+            except Exception as e:
+                log.debug(f"Error in queued playback: {e}")
+
+        threading.Thread(target=play_async, daemon=True).start()
+
     def _extract_sound_params(self, obj, sound):
         """Extract parameters needed for sound playback from NVDA object.
 
@@ -210,10 +237,11 @@ class SteamAudioPlayer:
         # Get coordinate bounds of desktop
         desktop_max_x, desktop_max_y = self._get_desktop_size()
 
-        # Get location of the object
-        if self.audio3d and obj.location is not None:
-            obj_x = obj.location[0] + (obj.location[2] / 2.0)
-            obj_y = obj.location[1] + (obj.location[3] / 2.0)
+        # Get location of the object (handle None objects - play centered)
+        obj_location = getattr(obj, 'location', None) if obj else None
+        if self.audio3d and obj_location is not None:
+            obj_x = obj_location[0] + (obj_location[2] / 2.0)
+            obj_y = obj_location[1] + (obj_location[3] / 2.0)
         else:
             # Objects without location are centered
             obj_x = desktop_max_x / 2.0

@@ -19,6 +19,7 @@
 
 from contextlib import suppress
 import os
+import time
 import wx
 import tones
 import api
@@ -50,10 +51,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Patched functions for browse mode support
+        # Hook for browse mode sounds (arrow navigation)
         self.original_speech_speakTextInfo = speech.speakTextInfo
         speech.speakTextInfo = self.audio_themes_speech_speakTextInfo
-        # Hook to keep NVDA from announcing roles (technique from unspoken-ng)
+        # Hook to suppress role speech when sounds play (focus mode only)
         self._original_getPropertiesSpeech = speech.speech.getPropertiesSpeech
         speech.speech.getPropertiesSpeech = self._hook_getPropertiesSpeech
         # Normal instantiate
@@ -62,6 +63,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             AudioThemesSettingsPanel
         )
         self._previous_mouse_object = None
+        # Track when focus event played a sound (for deduplication)
+        self._last_focus_sound_time = 0
+        # Track last object identity in browse mode (role + name for deduplication)
+        self._last_browse_object_id = None
         # Add the menu item for the audio themes studio
         self.studioMenuItem = gui.mainFrame.sysTrayIcon.menu.Insert(
             2,
@@ -82,6 +87,19 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             speech.speakTextInfo = self.original_speech_speakTextInfo
             speech.speech.getPropertiesSpeech = self._original_getPropertiesSpeech
             self.handler.close()
+
+    def _is_in_browse_mode(self):
+        """Check if we're currently in browse mode (virtual cursor active)."""
+        try:
+            focus = api.getFocusObject()
+            if focus and hasattr(focus, 'treeInterceptor'):
+                ti = focus.treeInterceptor
+                if ti and hasattr(ti, 'passThrough'):
+                    # Browse mode = treeInterceptor active and not in passThrough (focus) mode
+                    return not ti.passThrough
+        except Exception:
+            pass
+        return False
 
     def _should_suppress_role(self):
         """Check if role speech should be suppressed based on settings."""
@@ -108,7 +126,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     ):
         """Hook that suppresses role speech when speak_roles is disabled.
 
-        Technique from unspoken-ng: rename 'role' to '_role' which NVDA ignores.
+        Only suppresses in focus mode - browse mode speaks roles normally.
         """
         role = kwargs.get("role", None)
         if role is not None:
@@ -119,6 +137,33 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                     kwargs["_role"] = kwargs["role"]
                     del kwargs["role"]
         return self._original_getPropertiesSpeech(reason, *args, **kwargs)
+
+    def audio_themes_speech_speakTextInfo(self, info, *args, **kwargs):
+        """Hook for browse mode sounds - plays sound for object at caret position."""
+        # Only play in browse mode, and skip if focus just played a sound (avoid duplicates on Tab)
+        if self._is_in_browse_mode():
+            # Skip if focus event just played a sound (within 0.2 seconds)
+            if time.time() - self._last_focus_sound_time > 0.2:
+                try:
+                    obj = info.NVDAObjectAtStart
+                    if obj is not None:
+                        if obj.role == controlTypes.Role.REDUNDANTOBJECT:
+                            obj = obj.parent
+                        if obj is not None:
+                            # Track by role + name + location to identify different objects
+                            obj_name = getattr(obj, 'name', '') or ''
+                            obj_location = getattr(obj, 'location', None)
+                            loc_tuple = tuple(obj_location) if obj_location else None
+                            current_id = (obj.role, obj_name, loc_tuple)
+                            if current_id != self._last_browse_object_id:
+                                self._last_browse_object_id = current_id
+                                self.playObject(obj)
+                except Exception:
+                    pass
+        else:
+            # Reset tracking when leaving browse mode
+            self._last_browse_object_id = None
+        return self.original_speech_speakTextInfo(info, *args, **kwargs)
 
     def on_studio_item_clicked(self, event):
         # Translators: title for the audio themes studio dialog
@@ -134,27 +179,17 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         globalCommands.GlobalCommands.script_reportCurrentFocus.__doc__
     )
 
-    def audio_themes_speech_speakTextInfo(self, info, *args, **kwargs):
-        current_tree_interceptor = api.getFocusObject().treeInterceptor
-        if (current_tree_interceptor is None) or not isinstance(
-            current_tree_interceptor, browseMode.BrowseModeDocumentTreeInterceptor
-        ):
-            return self.original_speech_speakTextInfo(info, *args, **kwargs)
-        obj = info.NVDAObjectAtStart
-        if obj.role == controlTypes.Role.TABLE:
-            tones.beep(100, 100)
-        gui.cinfo = obj
-        if obj.role == controlTypes.Role.REDUNDANTOBJECT:
-            obj = obj.parent
-        self.playObject(obj)
-        return self.original_speech_speakTextInfo(info, *args, **kwargs)
-
     def event_gainFocus(self, obj, nextHandler):
+        # Focus mode: play sound using focus object position
+        self._last_focus_sound_time = time.time()
         self.playObject(obj)
         nextHandler()
 
     def event_becomeNavigatorObject(self, obj, nextHandler, isFocus=False):
-        self.playObject(obj)
+        # Navigator object changed - this includes browse mode navigation
+        # Skip if triggered by focus change (already handled by event_gainFocus)
+        if not isFocus:
+            self.playObject(obj)
         nextHandler()
 
     def event_mouseMove(self, obj, nextHandler, x, y):
@@ -185,7 +220,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 obj.snd = order
             else:
                 obj.snd = obj.role
-        self.handler.play(obj, obj.snd)
+        self.handler.play_queued(obj, obj.snd)
 
     def getOrder(self, obj, parrole=14, chrole=15):
         if obj.parent and obj.parent.role != parrole:
