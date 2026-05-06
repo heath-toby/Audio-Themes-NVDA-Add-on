@@ -51,14 +51,20 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.handler = None
+        self.original_speech_speakTextInfo = None
+        self._original_getPropertiesSpeech = None
+        # Initialize handler first; if it raises (e.g. ve.dll fails to load on
+        # 64-bit, voice data missing) the speech hooks below are never
+        # installed, so the dangling references can't flood NVDA with cascading
+        # "GlobalPlugin has no attribute 'handler'" errors on every focus event.
+        self.handler = AudioThemesHandler()
         # Hook for browse mode sounds (arrow navigation)
         self.original_speech_speakTextInfo = speech.speakTextInfo
         speech.speakTextInfo = self.audio_themes_speech_speakTextInfo
         # Hook to suppress role speech when sounds play (focus mode only)
         self._original_getPropertiesSpeech = speech.speech.getPropertiesSpeech
         speech.speech.getPropertiesSpeech = self._hook_getPropertiesSpeech
-        # Normal instantiate
-        self.handler = AudioThemesHandler()
         gui.settingsDialogs.NVDASettingsDialog.categoryClasses.append(
             AudioThemesSettingsPanel
         )
@@ -83,10 +89,18 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             gui.settingsDialogs.NVDASettingsDialog.categoryClasses.remove(
                 AudioThemesSettingsPanel
             )
+        with suppress(Exception):
             gui.mainFrame.sysTrayIcon.menu.RemoveItem(self.studioMenuItem)
+        # Only restore hooks that were actually installed — if init failed
+        # before reaching them, restoring None here would clobber the real
+        # NVDA functions.
+        if self.original_speech_speakTextInfo is not None:
             speech.speakTextInfo = self.original_speech_speakTextInfo
+        if self._original_getPropertiesSpeech is not None:
             speech.speech.getPropertiesSpeech = self._original_getPropertiesSpeech
-            self.handler.close()
+        if self.handler is not None:
+            with suppress(Exception):
+                self.handler.close()
 
     def _is_in_browse_mode(self):
         """Check if we're currently in browse mode (virtual cursor active)."""
