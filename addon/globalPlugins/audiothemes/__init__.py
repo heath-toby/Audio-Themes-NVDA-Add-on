@@ -34,6 +34,8 @@ import controlTypes
 import globalCommands
 import browseMode
 import config
+import ui
+from logHandler import log
 from speech.sayAll import SayAllHandler
 
 from .handler import AudioThemesHandler, SpecialProps
@@ -54,10 +56,8 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         self.handler = None
         self.original_speech_speakTextInfo = None
         self._original_getPropertiesSpeech = None
-        # Initialize handler first; if it raises (e.g. ve.dll fails to load on
-        # 64-bit, voice data missing) the speech hooks below are never
-        # installed, so the dangling references can't flood NVDA with cascading
-        # "GlobalPlugin has no attribute 'handler'" errors on every focus event.
+        # Initialize handler first; if it fails the hooks below are never installed,
+        # so a broken audio engine cannot flood NVDA with cascading errors.
         self.handler = AudioThemesHandler()
         # Hook for browse mode sounds (arrow navigation)
         self.original_speech_speakTextInfo = speech.speakTextInfo
@@ -91,9 +91,6 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             )
         with suppress(Exception):
             gui.mainFrame.sysTrayIcon.menu.RemoveItem(self.studioMenuItem)
-        # Only restore hooks that were actually installed — if init failed
-        # before reaching them, restoring None here would clobber the real
-        # NVDA functions.
         if self.original_speech_speakTextInfo is not None:
             speech.speakTextInfo = self.original_speech_speakTextInfo
         if self._original_getPropertiesSpeech is not None:
@@ -193,6 +190,62 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         globalCommands.GlobalCommands.script_reportCurrentFocus.__doc__
     )
 
+    @scriptHandler.script(
+        # Translators: input help message for the diagnostic logging script.
+        description=_(
+            "Audio Themes diagnostic: writes the current suppression state to NVDA's log "
+            "and announces a brief summary. Use this when role speech is being heard "
+            "while \"Speak roles\" is unticked, to capture why suppression isn't firing."
+        ),
+        category=_("Audio Themes"),
+    )
+    def script_logDiagnostics(self, gesture):
+        """Snapshot every input the role-suppression hook depends on, so we can
+        tell at a glance why suppression decided (or didn't decide) to fire.
+
+        Particularly useful for the intermittent "roles get spoken anyway" bug:
+        * `hook_installed` says whether anything has stomped on our
+          monkey-patch of `speech.speech.getPropertiesSpeech` after we set it
+          (which would silently disable suppression entirely).
+        * `say_all_isRunning` exposes the `SayAllHandler.isRunning()` value —
+          if `use_in_say_all` is on and `isRunning()` is stuck True (e.g. a
+          weakref hasn't released after a say-all reader was collected),
+          suppression is turned off until that clears.
+        * `active_theme` and the `speak_roles` / `enable_audio_themes` config
+          flags round out the full picture.
+        """
+        try:
+            conf = config.conf["audiothemes"]
+            active_theme = self.handler.active_theme if self.handler else None
+            state = {
+                "speak_roles": conf["speak_roles"],
+                "enable_audio_themes": conf["enable_audio_themes"],
+                "use_in_say_all": conf["use_in_say_all"],
+                "say_all_isRunning": SayAllHandler.isRunning(),
+                "active_theme": getattr(active_theme, "name", None),
+                "active_theme_sound_count": len(active_theme.sounds) if active_theme else None,
+                "should_suppress_role": self._should_suppress_role(),
+                "getPropertiesSpeech_hook_installed": (
+                    speech.speech.getPropertiesSpeech is self._hook_getPropertiesSpeech
+                ),
+                "speakTextInfo_hook_installed": (
+                    speech.speakTextInfo is self.audio_themes_speech_speakTextInfo
+                ),
+            }
+            log.info(f"Audio Themes diagnostics: {state}")
+            # Translators: brief spoken summary after the diagnostic logs to NVDA's log.
+            ui.message(_(
+                "Logged. speak roles {speak_roles}, say all {say_all}, hook {hook}."
+            ).format(
+                speak_roles="on" if state["speak_roles"] else "off",
+                say_all="running" if state["say_all_isRunning"] else "not running",
+                hook="installed" if state["getPropertiesSpeech_hook_installed"] else "MISSING",
+            ))
+        except Exception as e:
+            log.error("Audio Themes diagnostic script failed", exc_info=True)
+            # Translators: spoken when the diagnostic script itself raises.
+            ui.message(_("Audio Themes diagnostic failed: {error}").format(error=e))
+
     def event_gainFocus(self, obj, nextHandler):
         # Focus mode: play sound using focus object position
         self._last_focus_sound_time = time.time()
@@ -234,7 +287,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 obj.snd = order
             else:
                 obj.snd = obj.role
-        self.handler.play_queued(obj, obj.snd)
+        self.handler.play(obj, obj.snd)
 
     def getOrder(self, obj, parrole=14, chrole=15):
         if obj.parent and obj.parent.role != parrole:
