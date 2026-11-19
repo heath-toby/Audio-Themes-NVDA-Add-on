@@ -5,6 +5,8 @@
 # Based on Unspoken-NG by Bryan Smart, Austin Hicks, and Mason Armstrong
 
 import os
+import math
+import random
 import time
 import threading
 import dataclasses
@@ -22,6 +24,10 @@ except ImportError:
     import logging as log
 
 from . import steam_audio
+
+import addonHandler
+
+addonHandler.initTranslation()
 
 
 def clamp(value, min_value, max_value):
@@ -54,14 +60,22 @@ class SteamAudioPlayer:
         # Configure default reverb settings
         self._configure_reverb()
 
-        # Initialize WavePlayer for audio output (stereo, 44100Hz, 16-bit)
-        self._create_wave_player()
+        # Initialize a pool of WavePlayers for overlapping playback
+        self._pool_size = 6
+        self._player_pool = []
+        for _ in range(self._pool_size):
+            self._player_pool.append(nvwave.WavePlayer(
+                channels=2,
+                samplesPerSec=44100,
+                bitsPerSample=16,
+                outputDevice=config.conf["audio"]["outputDevice"],
+            ))
+        self._pool_index = 0
 
         # State tracking
         self._last_played_object = None
         self._last_played_time = 0
         self._last_played_sound = None
-        self._wave_player_lock = threading.Lock()
         self._sound_generation = 0
 
         # Desktop dimension caching
@@ -71,10 +85,18 @@ class SteamAudioPlayer:
         self._update_desktop_cache()
         self._update_volume_cache()
 
-        # Display parameters (in degrees)
-        self._display_width = 180.0
-        self._display_height_min = -40.0
-        self._display_height_magnitude = 50.0
+        self._direction_test_running = False
+
+        # Output renderer: "steam" (Steam Audio HRTF -> stereo) or "spatial"
+        # (Windows Spatial Audio objects, rendered by Windows Sonic / Dolby Atmos / DTS).
+        self.output_mode = "steam"
+        self._spatial_active = False
+        self._spatial_device = None
+        self._spatial_lock = threading.Lock()
+
+        # Display parameters (degrees either side of centre; overridden from config)
+        self._default_horizontal_spread = 90.0
+        self._default_vertical_spread = 45.0
 
     def _configure_reverb(self):
         """Configure reverb settings from config if available."""
@@ -92,14 +114,6 @@ class SteamAudioPlayer:
             log.debug(f"Using default reverb settings: {e}")
             self.steam_audio.set_reverb_settings(0.1, 1.0, 0.09, 0.3, 1.0)
 
-    def _create_wave_player(self):
-        """Create nvwave WavePlayer for audio output."""
-        self.wave_player = nvwave.WavePlayer(
-            channels=2,
-            samplesPerSec=44100,
-            bitsPerSample=16,
-            outputDevice=config.conf["audio"]["outputDevice"],
-        )
 
     def make_sound_object(self, filename):
         """Load a WAV audio file and return a dict with float32 mono samples.
@@ -131,7 +145,9 @@ class SteamAudioPlayer:
                 if channels == 2:
                     float_samples = [float_samples[i] for i in range(0, len(float_samples), 2)]
 
-                return {"data": float_samples, "sample_rate": sample_rate}
+                # Pre-convert to ctypes array for fast DLL calls
+                ctypes_buf, ctypes_len = self.steam_audio.make_ctypes_buffer(float_samples)
+                return {"data": float_samples, "ctypes_buf": ctypes_buf, "ctypes_len": ctypes_len, "sample_rate": sample_rate}
 
         except Exception as e:
             log.error(f"Failed to load audio file {filename}: {e}")
@@ -190,7 +206,10 @@ class SteamAudioPlayer:
         if params is None:
             return
 
-        # Play in background thread (interrupts previous sound for responsive navigation)
+        # Assign a player from the pool on the main thread
+        params["player"] = self._get_next_player()
+
+        # Play in background thread
         self._sound_generation += 1
         my_generation = self._sound_generation
 
@@ -220,7 +239,10 @@ class SteamAudioPlayer:
         if params is None:
             return
 
-        # Play in background thread (queued, doesn't interrupt)
+        # Assign a player from the pool on the main thread
+        params["player"] = self._get_next_player()
+
+        # Play in background thread
         def play_async():
             try:
                 self._play_sound_queued(params)
@@ -247,10 +269,19 @@ class SteamAudioPlayer:
             obj_x = desktop_max_x / 2.0
             obj_y = desktop_max_y / 2.0
 
-        # Scale object position to audio display
-        angle_x = ((obj_x - desktop_max_x / 2.0) / desktop_max_x) * self._display_width
-        percent = (desktop_max_y - obj_y) / desktop_max_y
-        angle_y = self._display_height_magnitude * percent + self._display_height_min
+        # Map the screen onto a field of azimuth/elevation angles in front of the listener.
+        # Left edge = -spread, right edge = +spread; bottom = -spread, top = +spread.
+        try:
+            conf = config.conf["audiothemes"]
+            h_spread = float(conf.get("HorizontalSpread", self._default_horizontal_spread))
+            v_spread = float(conf.get("VerticalSpread", self._default_vertical_spread))
+        except Exception:
+            h_spread = self._default_horizontal_spread
+            v_spread = self._default_vertical_spread
+        x_fraction = (obj_x - desktop_max_x / 2.0) / desktop_max_x  # -0.5 .. 0.5
+        y_fraction = (desktop_max_y / 2.0 - obj_y) / desktop_max_y  # -0.5 (bottom) .. 0.5 (top)
+        angle_x = x_fraction * 2.0 * h_spread
+        angle_y = y_fraction * 2.0 * v_spread
 
         # Clamp angles to valid ranges
         angle_x = clamp(angle_x, -90.0, 90.0)
@@ -258,89 +289,126 @@ class SteamAudioPlayer:
 
         return {
             "sound_data": sound["data"],
+            "ctypes_buf": sound.get("ctypes_buf"),
+            "ctypes_len": sound.get("ctypes_len", 0),
             "angle_x": angle_x,
             "angle_y": angle_y,
             "volume": self._cached_volume,
+            "sample_rate": sound.get("sample_rate", 44100),
         }
 
+    def _get_next_player(self):
+        """Get the next WavePlayer from the pool (round-robin)."""
+        player = self._player_pool[self._pool_index]
+        self._pool_index = (self._pool_index + 1) % self._pool_size
+        return player
+
+    def set_output_mode(self, mode, device_id=None):
+        """Select "steam" or "spatial" output. Returns the spatial_init status (0 = fine).
+
+        If spatial output can't start, the player keeps using Steam Audio.
+        """
+        if device_id in (None, "", "default"):
+            device_id = None
+        with self._spatial_lock:
+            self.output_mode = mode
+            if mode != "spatial":
+                if self._spatial_active:
+                    self.steam_audio.spatial_shutdown()
+                self._spatial_active = False
+                self._spatial_device = None
+                return 0
+            if self._spatial_active and self._spatial_device == device_id and self.steam_audio.spatial_is_active():
+                return 0
+            status = self.steam_audio.spatial_init(device_id)
+            self._spatial_active = status == 0
+            self._spatial_device = device_id if status == 0 else None
+            if status == 0:
+                log.info("Audio Themes: Windows Spatial Audio output started")
+            else:
+                log.info(f"Audio Themes: Windows Spatial Audio unavailable (status {status}); using Steam Audio")
+            return status
+
+    @property
+    def spatial_active(self):
+        return self._spatial_active
+
+    def _render(self, ctypes_buf, ctypes_len, sample_rate, angle_x, angle_y, volume, use_reverb, player):
+        """Play one positioned sound through the active renderer (background thread)."""
+        if self._spatial_active:
+            spatial_volume = clamp(volume, 0.0, 1.0)
+            if self.steam_audio.spatial_play(ctypes_buf, ctypes_len, sample_rate, angle_x, angle_y, spatial_volume):
+                return True
+            # Stream died (device unplugged, spatial format switched off): try to reopen once
+            with self._spatial_lock:
+                if self._spatial_active and not self.steam_audio.spatial_is_active():
+                    status = self.steam_audio.spatial_init(self._spatial_device)
+                    self._spatial_active = status == 0
+                    if status != 0:
+                        log.warning(f"Audio Themes: lost Windows Spatial Audio (status {status}); using Steam Audio")
+            if self._spatial_active and self.steam_audio.spatial_play(
+                ctypes_buf, ctypes_len, sample_rate, angle_x, angle_y, spatial_volume
+            ):
+                return True
+        audio = self.steam_audio.process_sound_full(
+            ctypes_buf, ctypes_len, angle_x, angle_y, volume, use_reverb
+        )
+        if not audio:
+            log.debug("Failed to process sound with Steam Audio")
+            return False
+        player.feed(audio)
+        return True
+
     def _play_sound_async(self, params, generation):
-        """Process and play sound on background thread."""
-        sound_data = params["sound_data"]
+        """Process and play sound on background thread.
+
+        Uses a pool of WavePlayers so sounds overlap naturally.
+        """
         angle_x = params["angle_x"]
         angle_y = params["angle_y"]
         volume = params["volume"]
 
-        # Adjust volume
-        adjusted_audio = [sample * volume for sample in sound_data]
-
-        # Process with Steam Audio for 3D positioning
-        processed_audio = self.steam_audio.process_sound(
-            adjusted_audio, angle_x, angle_y
-        )
-        if not processed_audio:
-            log.debug("Failed to process sound with Steam Audio")
-            return
-
-        # Apply reverb if enabled
-        final_audio = processed_audio
+        # Determine if reverb is enabled
+        use_reverb = False
         if self.use_reverb:
             try:
                 conf = config.conf.get("audiothemes", {})
-                if conf.get("use_reverb", True):
-                    reverb_audio = self.steam_audio.apply_reverb(processed_audio)
-                    if reverb_audio:
-                        final_audio = reverb_audio
+                use_reverb = conf.get("use_reverb", True)
             except Exception:
                 pass
 
-        # Check if this sound has been superseded
-        if generation != self._sound_generation:
-            return
+        self._render_params(params, angle_x, angle_y, volume, use_reverb)
 
-        # Stop previous sound and play new one
-        self.wave_player.stop()
-
-        with self._wave_player_lock:
-            if generation != self._sound_generation:
-                return
-            self.wave_player.feed(final_audio)
+    def _render_params(self, params, angle_x, angle_y, volume, use_reverb):
+        ctypes_buf = params.get("ctypes_buf")
+        ctypes_len = params.get("ctypes_len", 0)
+        if ctypes_buf is None or ctypes_len <= 0:
+            # Sounds always get a ctypes buffer in make_sound_object; build one if not
+            ctypes_buf, ctypes_len = self.steam_audio.make_ctypes_buffer(params["sound_data"])
+        self._render(
+            ctypes_buf, ctypes_len, params.get("sample_rate", 44100),
+            angle_x, angle_y, volume, use_reverb, params["player"],
+        )
 
     def _play_sound_queued(self, params):
-        """Process and queue sound without interrupting current playback.
+        """Process and play sound overlapping with current playback.
 
-        Sounds are queued and play one after another instead of interrupting.
+        Uses same pool approach as _play_sound_async.
         """
-        sound_data = params["sound_data"]
         angle_x = params["angle_x"]
         angle_y = params["angle_y"]
         volume = params["volume"]
 
-        # Adjust volume
-        adjusted_audio = [sample * volume for sample in sound_data]
-
-        # Process with Steam Audio for 3D positioning
-        processed_audio = self.steam_audio.process_sound(
-            adjusted_audio, angle_x, angle_y
-        )
-        if not processed_audio:
-            log.debug("Failed to process sound with Steam Audio")
-            return
-
-        # Apply reverb if enabled
-        final_audio = processed_audio
+        # Determine if reverb is enabled
+        use_reverb = False
         if self.use_reverb:
             try:
                 conf = config.conf.get("audiothemes", {})
-                if conf.get("use_reverb", True):
-                    reverb_audio = self.steam_audio.apply_reverb(processed_audio)
-                    if reverb_audio:
-                        final_audio = reverb_audio
+                use_reverb = conf.get("use_reverb", True)
             except Exception:
                 pass
 
-        # Queue the sound (no stop() call - sounds play sequentially)
-        with self._wave_player_lock:
-            self.wave_player.feed(final_audio)
+        self._render_params(params, angle_x, angle_y, volume, use_reverb)
 
     def play_file(self, filepath):
         """Play an audio file directly (for theme editor preview).
@@ -352,22 +420,88 @@ class SteamAudioPlayer:
         if sound is None:
             return
 
-        self._sound_generation += 1
-        my_generation = self._sound_generation
+        player = self._get_next_player()
 
         def play_async():
             try:
                 # Play centered (no 3D positioning for preview)
                 processed = self.steam_audio.process_sound(sound["data"], 0.0, 0.0)
-                if processed and my_generation == self._sound_generation:
-                    self.wave_player.stop()
-                    with self._wave_player_lock:
-                        if my_generation == self._sound_generation:
-                            self.wave_player.feed(processed)
+                if processed:
+                    player.feed(processed)
             except Exception as e:
                 log.debug(f"Error playing file: {e}")
 
         threading.Thread(target=play_async, daemon=True).start()
+
+    # (label, azimuth, elevation) for the direction test
+    DIRECTION_TEST_POSITIONS = (
+        # Translators: spoken before the test sound placed straight ahead of the listener
+        (_("Front"), 0.0, 0.0),
+        # Translators: spoken before the test sound placed to the listener's right
+        (_("Right"), 90.0, 0.0),
+        # Translators: spoken before the test sound placed behind the listener
+        (_("Behind"), 180.0, 0.0),
+        # Translators: spoken before the test sound placed to the listener's left
+        (_("Left"), -90.0, 0.0),
+        # Translators: spoken before the test sound placed above, in front of the listener
+        (_("Up"), 0.0, 60.0),
+        # Translators: spoken before the test sound placed below, in front of the listener
+        (_("Down"), 0.0, -40.0),
+    )
+
+    def _make_test_burst(self):
+        """Three short broadband noise bursts: the easiest signal to localise."""
+        rate = 44100
+        burst = int(0.12 * rate)
+        gap = int(0.08 * rate)
+        fade = int(0.005 * rate)
+        rng = random.Random(7)
+        samples = []
+        for _i in range(3):
+            for n in range(burst):
+                env = min(1.0, n / fade, (burst - 1 - n) / fade)
+                samples.append(rng.uniform(-0.35, 0.35) * env)
+            samples.extend([0.0] * gap)
+        return samples
+
+    def play_direction_test(self, sound=None):
+        """Speak each direction then play a test sound there through the active renderer.
+
+        sound: a make_sound_object() dict (e.g. the theme's button sound); noise bursts if None.
+        """
+        if self._direction_test_running:
+            return
+        self._direction_test_running = True
+        import queueHandler
+        import ui
+
+        if sound and sound.get("ctypes_buf") is not None:
+            ctypes_buf, ctypes_len = sound["ctypes_buf"], sound["ctypes_len"]
+            sample_rate = sound.get("sample_rate", 44100)
+        else:
+            burst = self._make_test_burst()
+            ctypes_buf, ctypes_len = self.steam_audio.make_ctypes_buffer(burst)
+            sample_rate = 44100
+        player = self._get_next_player()
+
+        def worker():
+            try:
+                for label, az, el in self.DIRECTION_TEST_POSITIONS:
+                    queueHandler.queueFunction(queueHandler.eventQueue, ui.message, label)
+                    time.sleep(0.9)
+                    self._render(
+                        ctypes_buf, ctypes_len, sample_rate, az, el,
+                        self._cached_volume, False, player,
+                    )
+                    if not self._spatial_active:
+                        player.idle()
+                    time.sleep(0.8)
+            except Exception:
+                log.error("Audio Themes direction test failed", exc_info=True)
+            finally:
+                self._direction_test_running = False
+
+        threading.Thread(target=worker, name="AudioThemesDirectionTest", daemon=True).start()
 
     def close(self):
         """Clean up resources.
@@ -375,11 +509,11 @@ class SteamAudioPlayer:
         Note: Does NOT clean up Steam Audio since it's a shared singleton.
         Steam Audio cleanup happens only when the main plugin terminates.
         """
-        try:
-            with self._wave_player_lock:
-                self.wave_player.close()
-        except Exception:
-            pass
+        for player in getattr(self, "_player_pool", ()):
+            try:
+                player.close()
+            except Exception:
+                pass
 
     def close_and_cleanup_steam_audio(self):
         """Clean up all resources including Steam Audio singleton.

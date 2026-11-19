@@ -42,6 +42,11 @@ audiothemes_config_defaults = {
     "use_synth_volume": "boolean(default=True)",
     "volume": "integer(default=100)",
     "use_reverb": "boolean(default=True)",
+    # Degrees either side of centre: screen edges map to +/- this angle
+    "HorizontalSpread": "integer(default=90, min=0, max=90)",
+    "VerticalSpread": "integer(default=45, min=0, max=90)",
+    # 3D renderer: Steam Audio HRTF, or Windows Spatial Audio (Windows Sonic / Dolby Atmos / DTS)
+    "output_mode": 'option("steam", "spatial", default="steam")',
     "RoomSize": "integer(default=10, min=0, max=100)",
     "Damping": "integer(default=100, min=0, max=100)",
     "WetLevel": "integer(default=9, min=0, max=100)",
@@ -140,13 +145,24 @@ class AudioTheme:
                 return key
 
 
+_active_handler = None
+
+
+def get_active_handler():
+    """The running AudioThemesHandler, if the add-on started successfully."""
+    return _active_handler
+
+
 class AudioThemesHandler:
     """Query and manage audio themes."""
 
     def __init__(self):
+        global _active_handler
         config.conf.spec["audiothemes"] = audiothemes_config_defaults
         self.enabled = True
         self.player = SteamAudioPlayer()
+        self._spatial_warned_for = None
+        _active_handler = self
         self.active_theme = None
         self.configure()
         for action in (
@@ -160,9 +176,35 @@ class AudioThemesHandler:
     def close(self):
         if self.active_theme is not None:
             self.active_theme.deactivate()
+        global _active_handler
+        if _active_handler is self:
+            _active_handler = None
         if hasattr(self, 'player') and self.player is not None:
             # Use close_and_cleanup_steam_audio to fully cleanup when plugin terminates
             self.player.close_and_cleanup_steam_audio()
+
+    def apply_output_mode(self, mode, announce=True):
+        """Switch renderer; tell the user once if Windows Spatial Audio can't be used."""
+        device = config.conf["audio"]["outputDevice"]
+        status = self.player.set_output_mode(mode, device)
+        if mode != "spatial" or status == 0:
+            self._spatial_warned_for = None
+            return status
+        if announce and self._spatial_warned_for != device:
+            self._spatial_warned_for = device
+            import queueHandler
+            import ui
+            if status == -4:
+                # Translators: spoken when Windows Spatial Audio is selected but turned off for the device
+                msg = _(
+                    "Spatial sound is off for this output device. Turn on Windows Sonic, "
+                    "Dolby Atmos or DTS for it in Windows sound settings. Using Steam Audio for now."
+                )
+            else:
+                # Translators: spoken when Windows Spatial Audio cannot be started
+                msg = _("Windows Spatial Audio could not be started. Using Steam Audio.")
+            queueHandler.queueFunction(queueHandler.eventQueue, ui.message, msg)
+        return status
 
     def get_active_theme(self):
         if not config.conf["audiothemes"]["enable_audio_themes"]:
@@ -181,6 +223,7 @@ class AudioThemesHandler:
         if self.active_theme is not None:
             self.active_theme.deactivate()
         self.enabled = user_config["enable_audio_themes"]
+        self.apply_output_mode(user_config.get("output_mode", "steam"))
         self.active_theme = self.get_active_theme()
         if self.active_theme is None:
             return

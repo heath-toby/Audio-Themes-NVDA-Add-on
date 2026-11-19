@@ -113,6 +113,32 @@ class SteamAudio:
 		]
 		self.dll.apply_reverb.restype = c_bool
 
+		# bool process_sound_full(const float* input_buffer, int input_length, float angle_x, float angle_y, float volume, bool use_reverb, int16_t** output_buffer, int* output_length)
+		self.dll.process_sound_full.argtypes = [
+			POINTER(c_float),  # input_buffer
+			c_int,  # input_length
+			c_float,  # angle_x
+			c_float,  # angle_y
+			c_float,  # volume
+			c_bool,  # use_reverb
+			POINTER(POINTER(ctypes.c_int16)),  # output_buffer
+			POINTER(c_int),  # output_length
+		]
+		self.dll.process_sound_full.restype = c_bool
+
+		# Windows Spatial Audio (spatial.cpp). These have their own internal locking and
+		# must NOT take _steam_audio_mutex.
+		self.dll.spatial_init.argtypes = [ctypes.c_wchar_p]
+		self.dll.spatial_init.restype = c_int
+		self.dll.spatial_play.argtypes = [POINTER(c_float), c_int, c_int, c_float, c_float, c_float]
+		self.dll.spatial_play.restype = c_bool
+		self.dll.spatial_is_active.argtypes = []
+		self.dll.spatial_is_active.restype = c_bool
+		self.dll.spatial_stop_all.argtypes = []
+		self.dll.spatial_stop_all.restype = None
+		self.dll.spatial_shutdown.argtypes = []
+		self.dll.spatial_shutdown.restype = None
+
 		# void free_output_sound(int16_t* buffer)
 		self.dll.free_output_sound.argtypes = [POINTER(ctypes.c_int16)]
 		self.dll.free_output_sound.restype = None
@@ -147,6 +173,10 @@ class SteamAudio:
 
 	def cleanup(self):
 		"""Cleanup Steam Audio resources"""
+		try:
+			self.dll.spatial_shutdown()
+		except Exception:
+			pass
 		if self.initialized:
 			with _steam_audio_mutex:
 				self.dll.cleanup_steam_audio()
@@ -182,6 +212,30 @@ class SteamAudio:
 				log.error("Failed to set reverb settings")
 
 		return success
+
+	# Status codes from spatial_init
+	SPATIAL_OK = 0
+	SPATIAL_E_DISABLED = -4
+
+	def spatial_init(self, device_id=None):
+		"""Open Windows Spatial Audio on an endpoint ID (None = default device).
+
+		Returns 0 on success or a negative status (-4 = spatial sound is off for the device).
+		"""
+		return int(self.dll.spatial_init(device_id or None))
+
+	def spatial_play(self, input_ctypes, input_length, sample_rate, angle_x, angle_y, volume):
+		"""Queue a mono sound as a spatial audio object. False if spatial output isn't running."""
+		input_ptr = ctypes.cast(input_ctypes, POINTER(c_float))
+		return bool(self.dll.spatial_play(
+			input_ptr, input_length, int(sample_rate), c_float(angle_x), c_float(angle_y), c_float(volume)
+		))
+
+	def spatial_is_active(self):
+		return bool(self.dll.spatial_is_active())
+
+	def spatial_shutdown(self):
+		self.dll.spatial_shutdown()
 
 	def process_sound(self, input_buffer, angle_x, angle_y):
 		"""Process audio with 3D positioning (without reverb)
@@ -223,26 +277,99 @@ class SteamAudio:
 			return None
 
 		try:
-			# Convert output to bytes
+			# Convert output to bytes via direct memory copy
 			output_samples = output_length.value
 			if output_samples > 0:
-				# Pack int16 samples into bytes
-				result = struct.pack(
-					f"<{output_samples}h",
-					*[output_buffer_ptr[i] for i in range(output_samples)],
-				)
+				num_bytes = output_samples * 2  # 2 bytes per int16
+				result = (ctypes.c_char * num_bytes)()
+				ctypes.memmove(result, output_buffer_ptr, num_bytes)
 
 				# Free the output buffer
 				with _steam_audio_mutex:
 					self.dll.free_output_sound(output_buffer_ptr)
 
-				return result
+				return bytes(result)
 			else:
 				return b""
 
 		except Exception as e:
 			log.error(f"Error processing output buffer: {e}")
 			# Make sure to free the buffer even if there's an error
+			if output_buffer_ptr:
+				with _steam_audio_mutex:
+					self.dll.free_output_sound(output_buffer_ptr)
+			return None
+
+	def make_ctypes_buffer(self, float_samples):
+		"""Pre-convert a list of float samples to a ctypes array for fast reuse.
+
+		Args:
+		    float_samples: list of float32 mono audio samples
+
+		Returns:
+		    tuple of (ctypes float array, int length)
+		"""
+		length = len(float_samples)
+		arr = (c_float * length)(*float_samples)
+		return arr, length
+
+	def process_sound_full(self, input_ctypes, input_length, angle_x, angle_y, volume, use_reverb):
+		"""Process audio with 3D positioning, volume, and reverb in one DLL call.
+
+		Args:
+		    input_ctypes: ctypes float array (from make_ctypes_buffer)
+		    input_length: number of float samples
+		    angle_x: Horizontal angle in degrees (-90 to 90)
+		    angle_y: Vertical angle in degrees (-90 to 90)
+		    volume: Volume multiplier (0.0 to ~1.25)
+		    use_reverb: Whether to apply reverb
+
+		Returns:
+		    bytes: Stereo 16-bit audio samples, or None if failed
+		"""
+		if not self.initialized:
+			log.error("Steam Audio not initialized")
+			return None
+
+		input_ptr = ctypes.cast(input_ctypes, POINTER(c_float))
+
+		# Prepare output parameters
+		output_buffer_ptr = POINTER(ctypes.c_int16)()
+		output_length = c_int()
+
+		# Single DLL call does volume + 3D + reverb
+		with _steam_audio_mutex:
+			success = self.dll.process_sound_full(
+				input_ptr,
+				input_length,
+				c_float(angle_x),
+				c_float(angle_y),
+				c_float(volume),
+				use_reverb,
+				byref(output_buffer_ptr),
+				byref(output_length),
+			)
+
+		if not success or not output_buffer_ptr:
+			log.error("Failed to process sound (full)")
+			return None
+
+		try:
+			output_samples = output_length.value
+			if output_samples > 0:
+				num_bytes = output_samples * 2
+				result = (ctypes.c_char * num_bytes)()
+				ctypes.memmove(result, output_buffer_ptr, num_bytes)
+
+				with _steam_audio_mutex:
+					self.dll.free_output_sound(output_buffer_ptr)
+
+				return bytes(result)
+			else:
+				return b""
+
+		except Exception as e:
+			log.error(f"Error processing full output buffer: {e}")
 			if output_buffer_ptr:
 				with _steam_audio_mutex:
 					self.dll.free_output_sound(output_buffer_ptr)
@@ -261,13 +388,10 @@ class SteamAudio:
 			log.error("Steam Audio not initialized")
 			return None
 
-		# Convert bytes to int16 array
-		import struct
-
-		samples = struct.unpack(f"<{len(input_buffer) // 2}h", input_buffer)
-		input_array = (ctypes.c_int16 * len(samples))(*samples)
+		# Pass input bytes directly as int16 pointer (no unpacking needed)
+		input_length = len(input_buffer) // 2  # number of int16 samples
+		input_array = (ctypes.c_char * len(input_buffer)).from_buffer_copy(input_buffer)
 		input_ptr = ctypes.cast(input_array, POINTER(ctypes.c_int16))
-		input_length = len(samples)
 
 		# Prepare output parameters
 		output_buffer_ptr = POINTER(ctypes.c_int16)()
@@ -284,20 +408,18 @@ class SteamAudio:
 			return None
 
 		try:
-			# Convert output to bytes
+			# Convert output to bytes via direct memory copy
 			output_samples = output_length.value
 			if output_samples > 0:
-				# Pack int16 samples into bytes
-				result = struct.pack(
-					f"<{output_samples}h",
-					*[output_buffer_ptr[i] for i in range(output_samples)],
-				)
+				num_bytes = output_samples * 2  # 2 bytes per int16
+				result = (ctypes.c_char * num_bytes)()
+				ctypes.memmove(result, output_buffer_ptr, num_bytes)
 
 				# Free the output buffer
 				with _steam_audio_mutex:
 					self.dll.free_output_sound(output_buffer_ptr)
 
-				return result
+				return bytes(result)
 			else:
 				return b""
 

@@ -6,6 +6,19 @@ This version of the Audio Themes add-on has been modernized for NVDA 2025 compat
 
 **I am not a professional programmer.** If you have programming expertise and notice issues or areas for improvement, please feel free to audit, edit, or contribute to this codebase. Pull requests and code reviews are very welcome.
 
+## What's New in Version 8.3.1
+
+- **Full 3D audio**: Sounds are now placed above and below you as well as left and right, following where each object sits on the screen. Previously the vertical position was calculated incorrectly, so most sounds ended up below and slightly behind the listener.
+- **Windows Spatial Audio support**: A new "3D sound renderer" setting lets you render sounds as Windows spatial audio objects instead of using the built-in Steam Audio processing. Your chosen spatial sound format (Windows Sonic, Dolby Atmos or DTS Headphone:X) then positions each sound. Spatial sound must be switched on for your output device in Windows sound settings; if it isn't available, the add-on tells you and falls back to Steam Audio. Steam Audio remains the default.
+- **Adjustable 3D field**: New "Left/right spread" and "Up/down spread" sliders control how far sounds at the edges of the screen are placed from centre.
+- **Test directions**: A new button in the settings plays your theme's button sound in front, right, behind, left, above and below, so you can compare renderers and settings by ear.
+- **Smoother positioning**: Steam Audio now blends between measured head positions (bilinear HRTF interpolation) instead of snapping to the nearest one.
+- **Lower latency**: Positioning, volume and reverb are now applied in a single native call per sound.
+
+## What's New in Version 8.2.0
+
+- **NVDA 2026.1 compatibility**: Updated for the 64-bit NVDA 2026.1, including 64-bit builds of the native audio libraries.
+
 ## What's New in Version 8.1.0
 
 - **Browse mode support**: Sounds now work properly in browse mode (arrow key navigation on web pages and documents). Sounds play once per object, whether arrowing or tabbing.

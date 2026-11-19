@@ -8,7 +8,13 @@ import config
 import gui
 from gui import guiHelper
 from gui.settingsDialogs import SettingsPanel
-from .handler import AudioThemesHandler, audiotheme_changed
+import os
+import ui
+from .handler import (
+    AudioThemesHandler,
+    audiotheme_changed,
+    get_active_handler,
+)
 
 
 import addonHandler
@@ -70,6 +76,38 @@ class AudioThemesSettingsPanel(SettingsPanel):
             maxValue=100
         )
 
+        # Translators: label for a slider setting how far left/right sounds at the screen edges are placed
+        self.horizontalSpreadSlider = sHelper.addLabeledControl(
+            _("Left/right spread in degrees (0-90):"),
+            wx.Slider,
+            minValue=0,
+            maxValue=90
+        )
+
+        # Translators: label for a slider setting how far up/down sounds at the top/bottom of the screen are placed
+        self.verticalSpreadSlider = sHelper.addLabeledControl(
+            _("Up/down spread in degrees (0-90):"),
+            wx.Slider,
+            minValue=0,
+            maxValue=90
+        )
+
+        # Translators: label for a combo box choosing how 3D sound is rendered
+        self.outputModeChoice = sHelper.addLabeledControl(
+            _("3D sound renderer:"), wx.Choice, choices=[]
+        )
+        for value, label in (
+            # Translators: renderer choice: the add-on's own headphone 3D processing
+            ("steam", _("Steam Audio (built in, headphones)")),
+            # Translators: renderer choice: hand positions to Windows' spatial sound format
+            ("spatial", _("Windows Spatial Audio (Windows Sonic, Dolby Atmos, DTS)")),
+        ):
+            self.outputModeChoice.Append(label, value)
+        # Translators: label for a button that plays test sounds in front, right, behind, left, up and down
+        self.testDirectionsButton = sHelper.addItem(
+            wx.Button(self, label=_("&Test directions"))
+        )
+
         # Translators: label for a checkbox to toggle reverb effect
         self.useReverbCheckbox = sHelper.addItem(
             wx.CheckBox(self, label=_("Use reverb effect"))
@@ -122,6 +160,7 @@ class AudioThemesSettingsPanel(SettingsPanel):
         self.enableThemesCheckbox.Bind(wx.EVT_CHECKBOX, self.onEnableChanged)
         self.useSynthVolumeCheckbox.Bind(wx.EVT_CHECKBOX, self.onSynthVolumeChanged)
         self.installedThemesChoice.Bind(wx.EVT_CHOICE, self.onThemeSelectionChanged)
+        self.testDirectionsButton.Bind(wx.EVT_BUTTON, self.onTestDirections)
 
         self._initialize_at_state()
         self._maintain_state()
@@ -142,6 +181,10 @@ class AudioThemesSettingsPanel(SettingsPanel):
             self.useInSayAllCheckbox,
             self.useSynthVolumeCheckbox,
             self.volumeSlider,
+            self.outputModeChoice,
+            self.testDirectionsButton,
+            self.horizontalSpreadSlider,
+            self.verticalSpreadSlider,
             self.useReverbCheckbox,
             self.roomSizeSlider,
             self.dampingSlider,
@@ -171,6 +214,10 @@ class AudioThemesSettingsPanel(SettingsPanel):
         self.useInSayAllCheckbox.SetValue(conf["use_in_say_all"])
         self.useSynthVolumeCheckbox.SetValue(conf["use_synth_volume"])
         self.volumeSlider.SetValue(conf["volume"])
+        mode = conf.get("output_mode", "steam")
+        self.outputModeChoice.SetSelection(1 if mode == "spatial" else 0)
+        self.horizontalSpreadSlider.SetValue(conf.get("HorizontalSpread", 90))
+        self.verticalSpreadSlider.SetValue(conf.get("VerticalSpread", 45))
         self.useReverbCheckbox.SetValue(conf.get("use_reverb", True))
         self.roomSizeSlider.SetValue(conf.get("RoomSize", 10))
         self.dampingSlider.SetValue(conf.get("Damping", 100))
@@ -200,6 +247,9 @@ class AudioThemesSettingsPanel(SettingsPanel):
         conf["use_in_say_all"] = self.useInSayAllCheckbox.IsChecked()
         conf["use_synth_volume"] = self.useSynthVolumeCheckbox.IsChecked()
         conf["volume"] = self.volumeSlider.GetValue()
+        conf["output_mode"] = self.selected_output_mode
+        conf["HorizontalSpread"] = self.horizontalSpreadSlider.GetValue()
+        conf["VerticalSpread"] = self.verticalSpreadSlider.GetValue()
         conf["use_reverb"] = self.useReverbCheckbox.IsChecked()
         conf["RoomSize"] = self.roomSizeSlider.GetValue()
         conf["Damping"] = self.dampingSlider.GetValue()
@@ -209,6 +259,41 @@ class AudioThemesSettingsPanel(SettingsPanel):
 
     def postSave(self):
         audiotheme_changed.notify()
+
+    def onDiscard(self):
+        # The direction test may have switched renderer without saving; switch back
+        handler = get_active_handler()
+        if handler is not None:
+            handler.apply_output_mode(
+                config.conf["audiothemes"].get("output_mode", "steam"), announce=False
+            )
+
+    @property
+    def selected_output_mode(self):
+        selection = self.outputModeChoice.GetSelection()
+        if selection == wx.NOT_FOUND:
+            return "steam"
+        return self.outputModeChoice.GetClientData(selection) or "steam"
+
+    def onTestDirections(self, event):
+        handler = get_active_handler()
+        if handler is None:
+            return
+        mode = self.selected_output_mode
+        status = handler.apply_output_mode(mode, announce=False)
+        if mode == "spatial" and status != 0:
+            if status == -4:
+                # Translators: reported by the direction test when spatial sound is off for the device
+                ui.message(_("Spatial sound is off for this device. Testing with Steam Audio."))
+            else:
+                # Translators: reported by the direction test when Windows Spatial Audio fails
+                ui.message(_("Windows Spatial Audio unavailable. Testing with Steam Audio."))
+        sound = None
+        theme = handler.active_theme
+        if theme is not None:
+            import controlTypes
+            sound = theme.sounds.get(controlTypes.Role.BUTTON)
+        handler.player.play_direction_test(sound)
 
     def onAbout(self, event):
         if not self.selected_theme:

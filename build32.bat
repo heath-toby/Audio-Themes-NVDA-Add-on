@@ -7,7 +7,7 @@ if errorlevel 1 (
     echo Could not find Visual Studio environment
     exit /b 1
 )
-cl /nologo /EHsc /LD main.cpp /I"..\steamaudio\steamaudio\include" "..\steamaudio\steamaudio\lib\windows-x86\phonon.lib" /link /out:steam_audio.dll
+cl /nologo /EHsc /LD main.cpp spatial.cpp ole32.lib /I"..\steamaudio\steamaudio\include" "..\steamaudio\steamaudio\lib\windows-x86\phonon.lib" /link /out:steam_audio.dll
 if errorlevel 1 (
     echo Build failed
     exit /b 1

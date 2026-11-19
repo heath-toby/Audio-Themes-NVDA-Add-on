@@ -38,6 +38,22 @@ struct SteamAudioState {
 
 static SteamAudioState g_state;
 
+// Convert azimuth/elevation in degrees into a unit direction vector in Steam Audio's
+// listener space: +X right, +Y up, -Z ahead (right-handed, see IPLVector3 in phonon.h).
+// azimuth: -90 (hard left) .. 0 (straight ahead) .. +90 (hard right)
+// elevation: -90 (below) .. 0 (ear level) .. +90 (above)
+static IPLVector3 direction_from_angles(float azimuth_deg, float elevation_deg)
+{
+	const float deg2rad = static_cast<float>(M_PI) / 180.0f;
+	float az = azimuth_deg * deg2rad;
+	float el = elevation_deg * deg2rad;
+	IPLVector3 d;
+	d.x = cosf(el) * sinf(az);
+	d.y = sinf(el);
+	d.z = -cosf(el) * cosf(az);
+	return d;
+}
+
 EXPORT bool initialize_steam_audio(int samplingrate, int framesize)
 {
 	if (g_state.initialized) {
@@ -53,7 +69,7 @@ EXPORT bool initialize_steam_audio(int samplingrate, int framesize)
 
 	g_state.audioSettings = { samplingrate, framesize };
 
-	IPLHRTFSettings hrtfSettings;
+	IPLHRTFSettings hrtfSettings{};
 	hrtfSettings.type = IPL_HRTFTYPE_DEFAULT;
 	hrtfSettings.volume = 1.0f;
 
@@ -62,7 +78,7 @@ EXPORT bool initialize_steam_audio(int samplingrate, int framesize)
 		return false;
 	}
 
-	IPLBinauralEffectSettings effectSettings;
+	IPLBinauralEffectSettings effectSettings{};
 	effectSettings.hrtf = g_state.hrtf;
 
 	if (iplBinauralEffectCreate(g_state.context, &g_state.audioSettings, &effectSettings, &g_state.effect) != IPL_STATUS_SUCCESS) {
@@ -152,34 +168,16 @@ EXPORT bool process_sound(const float* input_buffer, int input_length, float ang
 
 	int16_t* outData = output;
 
-	// Treat input as Cartesian coordinates (x, y) and create normalized direction vector
-	// Steam Audio uses right-handed coordinate system: +X right, +Y up, +Z forward
-	IPLVector3 direction;
-	direction.x = angle_x;  // X coordinate (left/right)
-	direction.y = angle_y;  // Y coordinate (up/down)
-	direction.z = 1.0f;     // Default forward distance
-
-	// Normalize the direction vector
-	float length = sqrtf(direction.x * direction.x + direction.y * direction.y + direction.z * direction.z);
-	if (length > 0.0f) {
-		direction.x /= length;
-		direction.y /= length;
-		direction.z /= length;
-	} else {
-		// Default to forward direction if coordinates are zero
-		direction.x = 0.0f;
-		direction.y = 0.0f;
-		direction.z = 1.0f;
-	}
+	IPLVector3 direction = direction_from_angles(angle_x, angle_y);
 
 	for (int i = 0; i < numframes; ++i)
 	{
 		float* frameData[] = { const_cast<float*>(inData) };
 		IPLAudioBuffer inBuffer{ 1, framesize, frameData };
 
-		IPLBinauralEffectParams params;
+		IPLBinauralEffectParams params{};
 		params.direction = direction;
-		params.interpolation = IPL_HRTFINTERPOLATION_NEAREST;
+		params.interpolation = IPL_HRTFINTERPOLATION_BILINEAR;
 		params.spatialBlend = 1.0f;
 		params.hrtf = g_state.hrtf;
 		params.peakDelays = nullptr;
@@ -211,14 +209,15 @@ EXPORT bool process_sound(const float* input_buffer, int input_length, float ang
 	return true;
 }
 
-EXPORT bool apply_reverb(const int16_t* input_buffer, int input_length, int16_t** output_buffer, int* output_length)
+// Combined function: 3D positioning + volume + reverb in a single DLL call
+EXPORT bool process_sound_full(const float* input_buffer, int input_length, float angle_x, float angle_y, float volume, bool use_reverb, int16_t** output_buffer, int* output_length)
 {
-	if (!g_state.initialized || !g_state.reverbInitialized || !input_buffer || !output_buffer || !output_length) {
+	if (!g_state.initialized || !input_buffer || !output_buffer || !output_length) {
 		return false;
 	}
 
 	auto framesize = g_state.audioSettings.frameSize;
-	auto numframes = (input_length / 2 + framesize - 1) / framesize; // Ceiling division, /2 because stereo
+	auto numframes = (input_length + framesize - 1) / framesize;
 
 	if (numframes == 0) {
 		*output_buffer = nullptr;
@@ -226,20 +225,85 @@ EXPORT bool apply_reverb(const int16_t* input_buffer, int input_length, int16_t*
 		return true;
 	}
 
-	// Calculate tail frames for reverb decay
-	unsigned long tail_frames = 0;
-	tail_frames = verblib_get_decay_time_in_frames(&g_state.reverb);
-	// Convert sample frames to processing frames
-	tail_frames = (tail_frames + framesize - 1) / framesize;
+	auto total_output_samples = numframes * framesize * 2;
+	int16_t* output = new int16_t[total_output_samples];
 
-	auto total_frames = numframes + tail_frames;
-	auto total_output_samples = total_frames * framesize * 2; // 2 channels
+	// Create padded + volume-adjusted input buffer
+	std::vector<float> paddedInput(numframes * framesize, 0.0f);
+	for (int i = 0; i < input_length; ++i) {
+		paddedInput[i] = input_buffer[i] * volume;
+	}
+	const float* inData = paddedInput.data();
+
+	int16_t* outData = output;
+
+	IPLVector3 direction = direction_from_angles(angle_x, angle_y);
+
+	for (int i = 0; i < numframes; ++i)
+	{
+		float* frameData[] = { const_cast<float*>(inData) };
+		IPLAudioBuffer inBuffer{ 1, framesize, frameData };
+
+		IPLBinauralEffectParams params{};
+		params.direction = direction;
+		params.interpolation = IPL_HRTFINTERPOLATION_BILINEAR;
+		params.spatialBlend = 1.0f;
+		params.hrtf = g_state.hrtf;
+		params.peakDelays = nullptr;
+
+		if (iplBinauralEffectApply(g_state.effect, &params, &inBuffer, &g_state.outBuffer) != IPL_STATUS_SUCCESS) {
+			delete[] output;
+			return false;
+		}
+
+		iplAudioBufferInterleave(g_state.context, &g_state.outBuffer, g_state.outputaudioframe.data());
+
+		// Apply reverb if enabled (in-place on float stereo data before int16 conversion)
+		if (use_reverb && g_state.reverbInitialized) {
+			verblib_process(&g_state.reverb, g_state.outputaudioframe.data(), g_state.outputaudioframe.data(), framesize);
+		}
+
+		// Convert float samples to 16-bit integers
+		for (int j = 0; j < framesize * 2; ++j) {
+			float sample = g_state.outputaudioframe[j];
+			sample = std::max(-1.0f, std::min(1.0f, sample));
+			outData[j] = static_cast<int16_t>(sample * 32767.0f);
+		}
+
+		inData += framesize;
+		outData += framesize * 2;
+	}
+
+	*output_buffer = output;
+	*output_length = total_output_samples;
+	return true;
+}
+
+EXPORT bool apply_reverb(const int16_t* input_buffer, int input_length, int16_t** output_buffer, int* output_length)
+{
+	if (!g_state.initialized || !g_state.reverbInitialized || !input_buffer || !output_buffer || !output_length) {
+		return false;
+	}
+
+	auto framesize = g_state.audioSettings.frameSize;
+	// input_length is total stereo samples, /2 for frames (stereo pair = 1 frame)
+	auto numframes = (input_length / 2 + framesize - 1) / framesize; // Ceiling division
+
+	if (numframes == 0) {
+		*output_buffer = nullptr;
+		*output_length = 0;
+		return true;
+	}
+
+	// No tail frames - process reverb in-place on the input only.
+	// UI navigation sounds need instant playback, not drawn-out reverb tails.
+	auto total_output_samples = numframes * framesize * 2; // 2 channels
 
 	// Allocate output buffer
 	int16_t* output = new int16_t[total_output_samples];
 
 	// Create padded input buffer for processing
-	std::vector<float> paddedInput(total_frames * framesize * 2, 0.0f);
+	std::vector<float> paddedInput(numframes * framesize * 2, 0.0f);
 
 	// Convert input int16 to float and copy to padded buffer
 	for (int i = 0; i < input_length; ++i) {
@@ -249,7 +313,7 @@ EXPORT bool apply_reverb(const int16_t* input_buffer, int input_length, int16_t*
 	int16_t* outData = output;
 	const float* inData = paddedInput.data();
 
-	for (int i = 0; i < total_frames; ++i)
+	for (int i = 0; i < numframes; ++i)
 	{
 		// Copy stereo data to reverb input buffer
 		std::copy(inData, inData + framesize * 2, g_state.reverbInputBuffer.begin());
